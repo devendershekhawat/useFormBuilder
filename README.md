@@ -1,36 +1,47 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+### useFormBuilder hook
 
-## Getting Started
+This is a custom hook that provides a simple way to create forms in React. It is inspired by the react-hook-form library, but it is not a direct replacement.
 
-First, run the development server:
+The hook can be found in the `src/lib/form-builder/useFormBuilder.tsx` file.
 
-```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+To use the hook, you can import it like this:
+
+```tsx
+import { useFormBuilder } from '@/lib/form-builder/useFormBuilder'
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+And use it to build a form like this:
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+```tsx
+const form = useFormBuilder({
+  defaultValues: {
+    title: '',
+    rating: 0,
+    comment: '',
+  },
+  validationSchema: {
+    parse: (values) => {
+      const errors: Record<string, string> = {}
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+      if (!values.title) {
+        errors.title = 'Title is required'
+      }
+      if (!values.rating) {
+        errors.rating = 'Rating is required'
+      }
+      if (!values.comment) {
+        errors.comment = 'Comment is required'
+      }
+      return errors
+    },
+  },
+  onSubmit: (values) => {
+    console.log(values)
+  },
+})
 
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+return form.render({
+  submitText: 'Submit Review',
+  grid: { columns: 1, gap: '1rem' },
+})
+```
