@@ -51,6 +51,11 @@ function renderForm({
         display: 'grid',
         gridTemplateColumns: `repeat(${grid.columns}, minmax(0, 1fr))`,
         gap: grid.gap || '1rem',
+        backgroundColor: 'var(--form-bg, #ffffff)',
+        padding: '1.5rem',
+        borderRadius: '0.5rem',
+        border: '1px solid var(--form-border, #e2e8f0)',
+        color: 'var(--form-text, #1a202c)',
       }}
     >
       {children}
@@ -67,6 +72,22 @@ function renderForm({
           disabled={
             isSubmitting || (!isDirty && Object.keys(errors).length > 0)
           }
+          style={{
+            backgroundColor: 'var(--button-bg, #3b82f6)',
+            color: 'var(--button-text, #ffffff)',
+            padding: '0.5rem 1rem',
+            borderRadius: '0.375rem',
+            border: 'none',
+            cursor: 'pointer',
+            opacity: isSubmitting ? 0.7 : 1,
+            ':disabled': {
+              backgroundColor: 'var(--button-disabled-bg, #cbd5e1)',
+              cursor: 'not-allowed',
+            },
+            ':hover:not(:disabled)': {
+              backgroundColor: 'var(--button-hover-bg, #2563eb)',
+            },
+          }}
         >
           {isSubmitting ? 'Submitting...' : submitText}
         </button>
