@@ -142,6 +142,8 @@ export default function MammalExplorer() {
   const [hovered, setHovered] = useState<string | null>(null)
   const [renderIds, setRenderIds] = useState<string[]>([])
   const [thumbs, setThumbs] = useState<Record<string, string>>({})
+  const [brokenImgs, setBrokenImgs] = useState<Set<string>>(() => new Set())
+  const markBroken = (src: string) => setBrokenImgs((prev) => new Set(prev).add(src))
   const [summaries, setSummaries] = useState<Record<string, WikiSummary | 'error'>>({})
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
@@ -741,6 +743,10 @@ export default function MammalExplorer() {
   }, [query])
 
   const sel = selected ? TREE.nodes.get(selected)! : null
+  const selSummary = sel ? summaries[sel.id] : undefined
+  const heroImg = [sel ? thumbs[sel.id] : undefined, selSummary && selSummary !== 'error' ? selSummary.image : undefined].find(
+    (src): src is string => !!src && !brokenImgs.has(src),
+  )
 
   return (
     <div className={styles.root}>
@@ -778,7 +784,7 @@ export default function MammalExplorer() {
             const open = expanded.has(id)
             const clade = isClade(n)
             const r = radiusOf(n, open)
-            const thumb = thumbs[id]
+            const thumb = thumbs[id] && !brokenImgs.has(thumbs[id]) ? thumbs[id] : undefined
             const rel = relation.get(id)
             const dim = rel === undefined ? 1 : 1 - 0.55 * Math.sqrt(rel / maxRelation)
             const cls = [
@@ -810,7 +816,14 @@ export default function MammalExplorer() {
                 <div className={styles.orb} style={{ opacity: dim }}>
                   {thumb && (
                     // eslint-disable-next-line @next/next/no-img-element
-                    <img className={styles.photo} src={thumb} alt="" draggable={false} loading="lazy" />
+                    <img
+                      className={styles.photo}
+                      src={thumb}
+                      alt=""
+                      draggable={false}
+                      loading="lazy"
+                      onError={() => markBroken(thumb)}
+                    />
                   )}
                   {!thumb && !clade && <span className={styles.glyph}>{n.emoji ?? initials(n.name)}</span>}
                   {clade && !open && (
@@ -914,9 +927,9 @@ export default function MammalExplorer() {
           </nav>
 
           <div className={styles.hero}>
-            {thumbs[sel.id] || (summaries[sel.id] as WikiSummary | undefined)?.image ? (
+            {heroImg ? (
               // eslint-disable-next-line @next/next/no-img-element
-              <img src={thumbs[sel.id] ?? (summaries[sel.id] as WikiSummary).image} alt={sel.name} />
+              <img src={heroImg} alt={sel.name} onError={() => markBroken(heroImg)} />
             ) : (
               <span>{sel.emoji ?? initials(sel.name)}</span>
             )}
@@ -950,6 +963,7 @@ export default function MammalExplorer() {
 
           <NearestRelatives id={sel.id} visible={layout.ids.filter((v) => !expanded.has(v))} onPick={reveal} />
 
+          {summaries[sel.id] !== 'error' && (
           <section className={styles.wiki}>
             {summaries[sel.id] === undefined && <p className={styles.loading}>Fetching from Wikipedia…</p>}
             {summaries[sel.id] && summaries[sel.id] !== 'error' && (
@@ -961,6 +975,7 @@ export default function MammalExplorer() {
               </>
             )}
           </section>
+          )}
         </aside>
       )}
     </div>
