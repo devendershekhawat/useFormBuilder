@@ -8,6 +8,9 @@ export default function Home() {
         <p className="text-gray-600 dark:text-gray-300">
           A collection of form examples built with our custom form builder hook
         </p>
+        <a href="/mammals" className="inline-block mt-4 text-sm underline underline-offset-4">
+          Explore the mammal family tree →
+        </a>
       </header>
 
       <main className="max-w-4xl mx-auto">
