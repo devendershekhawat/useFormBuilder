@@ -11,6 +11,7 @@ import {
   pathTo,
   type IndexedNode,
 } from '@/lib/mammals/tree'
+import { PHYS, buildLayout, cool, idealDistance, step, type Body, type Layout } from './physics'
 import { fetchSummary, fetchThumbnails, type WikiSummary } from './wiki'
 import styles from './MammalExplorer.module.css'
 
@@ -18,21 +19,7 @@ const TREE = indexTree(MAMMAL_TREE)
 const ROOT_ID = TREE.root.id
 const INITIAL_EXPANDED = ['mammalia', 'theria', 'placentalia']
 
-// Layout / physics tuning. Distances are in world pixels.
-const PHYS = {
-  gap: 26, // breathing room between bubble edges
-  spread: 19, // px per √(million years) of evolutionary distance
-  spring: 0.03, // pull toward the ideal distance
-  kinship: 5, // parent–child pairs pull this many times harder
-  pad: 14, // minimum space between bubble edges
-  gravity: 0.0012, // keeps the whole cloud centred
-  wander: 0.07, // the "suspended in air" drift
-  damping: 0.86,
-  maxSpeed: 22,
-}
-
 const LEAF_R = 30
-const SETTLE_STEPS = 150
 
 // ---------------------------------------------------------------------------
 // Pure helpers
@@ -86,49 +73,23 @@ const initials = (name: string) =>
     .map((w) => w[0])
     .join('') || name[0]
 
-// ---------------------------------------------------------------------------
-// Simulation types
-// ---------------------------------------------------------------------------
-
-interface Body {
-  id: string
-  x: number
-  y: number
-  vx: number
-  vy: number
-  fx: number
-  fy: number
-  r: number
-  tr: number
-  cr: number
-  // personal drift rhythm so no two bubbles float in sync
-  f1: number
-  f2: number
-  p1: number
-  p2: number
-  alpha: number
-  leaving: boolean
-  to: string | null
-}
-
-interface Layout {
-  ids: string[]
-  index: Map<string, number>
-  dist: Float32Array
-  weight: Float32Array
-}
-
-function idealDistance(L: Layout, a: string, b: string) {
-  const i = L.index.get(a)
-  const j = L.index.get(b)
-  if (i === undefined || j === undefined) return 120
-  return i < j ? L.dist[i * L.ids.length + j] : L.dist[j * L.ids.length + i]
+/** The bubbles the camera should keep in frame after a click (null = everything) */
+function focusGroupFor(id: string, opening: boolean): string[] {
+  const node = TREE.nodes.get(id)!
+  const parent = node.parentId ? TREE.nodes.get(node.parentId)! : null
+  if (opening) return [id, ...(node.children ?? []).map((c) => c.id), ...(parent ? [parent.id] : [])]
+  // collapsing or revealing: show the node among its siblings
+  return [id, ...(parent ? [parent.id, ...parent.children!.map((c) => c.id)] : [])]
 }
 
 interface Camera {
   x: number
   y: number
   s: number
+  /** zoom the camera is easing toward; frozen once the layout settles */
+  ts: number
+  /** keep re-measuring the zoom until this time (ms), then hold it */
+  fitUntil: number
   manual: boolean
 }
 
@@ -147,7 +108,6 @@ export default function MammalExplorer() {
   const [summaries, setSummaries] = useState<Record<string, WikiSummary | 'error'>>({})
   const [query, setQuery] = useState('')
   const [searchOpen, setSearchOpen] = useState(false)
-  const [manualCam, setManualCam] = useState(false)
 
   const stageRef = useRef<HTMLDivElement>(null)
   const worldRef = useRef<HTMLDivElement>(null)
@@ -156,7 +116,8 @@ export default function MammalExplorer() {
   const linkEls = useRef(new Map<string, SVGPathElement>())
   const bodies = useRef(new Map<string, Body>())
   const layoutRef = useRef<Layout | null>(null)
-  const cam = useRef<Camera>({ x: 0, y: 0, s: 0.6, manual: false })
+  const cam = useRef<Camera>({ x: 0, y: 0, s: 0.6, ts: 0.6, fitUntil: 0, manual: false })
+  const focusGroup = useRef<string[] | null>(null)
   const panelOpen = useRef(true)
   const drag = useRef<{
     id: string | null
@@ -169,26 +130,18 @@ export default function MammalExplorer() {
   } | null>(null)
   const pointers = useRef(new Map<number, { x: number; y: number }>())
   const pinch = useRef<{ dist: number } | null>(null)
-  const settle = useRef(0)
+  // 1 right after the tree changes, cooling toward a calm float
+  const heat = useRef(1)
 
   // ---- Derived layout: ideal distance for every pair of visible bubbles ----
   const layout = useMemo<Layout>(() => {
     const ids = visibleIds(expanded)
-    const n = ids.length
-    const dist = new Float32Array(n * n)
-    const weight = new Float32Array(n * n)
-    const radii = ids.map((id) => radiusOf(TREE.nodes.get(id)!, expanded.has(id)))
-    for (let i = 0; i < n; i++) {
-      for (let j = i + 1; j < n; j++) {
-        const myr = evoDistance(TREE, ids[i], ids[j])
-        const d = radii[i] + radii[j] + PHYS.gap + PHYS.spread * Math.sqrt(myr)
-        dist[i * n + j] = d
-        // Nearby relatives matter most: stress-style 1/d² weighting
-        const kin = TREE.nodes.get(ids[j])!.parentId === ids[i] ? PHYS.kinship : 1
-        weight[i * n + j] = kin * (160 / d) ** 1.6
-      }
-    }
-    return { ids, index: new Map(ids.map((id, i) => [id, i])), dist, weight }
+    return buildLayout(
+      ids,
+      ids.map((id) => radiusOf(TREE.nodes.get(id)!, expanded.has(id))),
+      (parent, child) => TREE.nodes.get(child)!.parentId === parent,
+      (a, b) => evoDistance(TREE, a, b),
+    )
   }, [expanded])
 
   // ---- Sync bodies with the visible set: spawn children, retire the rest ----
@@ -257,11 +210,10 @@ export default function MammalExplorer() {
         .find((n) => visible.has(n.id))?.id ?? ROOT_ID
     }
 
-    settle.current = SETTLE_STEPS
+    heat.current = 1
+    // let the camera re-measure while the new layout settles
+    cam.current.fitUntil = Math.max(cam.current.fitUntil, performance.now() + 1800)
     setRenderIds([...layout.ids, ...[...map.values()].filter((b) => b.leaving).map((b) => b.id)])
-    if (!cam.current.manual) return
-    cam.current.manual = false
-    setManualCam(false)
   }, [layout, expanded])
 
   useEffect(() => {
@@ -288,79 +240,11 @@ export default function MammalExplorer() {
       p: Math.random() * Math.PI * 2,
     }))
 
-    // One fixed physics tick (1 = 1/60 s)
-    const simulate = (bs: Body[], L: Layout, t: number, held: string | null) => {
-      const dt = 1
-      // Right after a change, let bubbles pass through each other so the tree
-      // can find its overall shape, then ease collisions back in.
-      const ghost = Math.min(1, Math.max(0, (SETTLE_STEPS - settle.current - 25) / 50))
-      const n = bs.length
-      if (n !== L.ids.length) return
-      for (const b of bs) {
-        b.fx = -b.x * PHYS.gravity + Math.sin(t * b.f1 + b.p1) * wander
-        b.fy = -b.y * PHYS.gravity + Math.cos(t * b.f2 + b.p2) * wander
-      }
-      for (let i = 0; i < n; i++) {
-        const a = bs[i]
-        for (let j = i + 1; j < n; j++) {
-          const c = bs[j]
-          const dx = c.x - a.x
-          const dy = c.y - a.y
-          const d = Math.hypot(dx, dy) || 0.01
-          const k = i * n + j
-          const f = (d - L.dist[k]) * L.weight[k] * PHYS.spring
-          a.fx += (f * dx) / d
-          a.fy += (f * dy) / d
-          c.fx -= (f * dx) / d
-          c.fy -= (f * dy) / d
-        }
-      }
-      const damp = Math.pow(PHYS.damping, dt)
-      for (const b of bs) {
-        if (b.id === held) continue
-        b.vx = (b.vx + b.fx * dt) * damp
-        b.vy = (b.vy + b.fy * dt) * damp
-        const sp = Math.hypot(b.vx, b.vy)
-        if (sp > PHYS.maxSpeed) {
-          b.vx *= PHYS.maxSpeed / sp
-          b.vy *= PHYS.maxSpeed / sp
-        }
-        b.x += b.vx * dt
-        b.y += b.vy * dt
-      }
-      // hard collisions: bubbles never pass through each other
-      for (let pass = 0; pass < 2; pass++) {
-        for (let i = 0; i < n; i++) {
-          const a = bs[i]
-          for (let j = i + 1; j < n; j++) {
-            const c = bs[j]
-            let dx = c.x - a.x
-            let dy = c.y - a.y
-            let d = Math.hypot(dx, dy)
-            const min = a.cr + c.cr + PHYS.pad
-            if (d >= min) continue
-            if (d < 0.01) {
-              dx = Math.random() - 0.5
-              dy = Math.random() - 0.5
-              d = Math.hypot(dx, dy)
-            }
-            const push = ((min - d) / d) * 0.5 * ghost
-            if (push === 0) continue
-            const wa = a.id === held ? 0 : c.id === held ? 1 : 0.5
-            const wc = 1 - wa
-            a.x -= dx * push * wa * 2
-            a.y -= dy * push * wa * 2
-            c.x += dx * push * wc * 2
-            c.y += dy * push * wc * 2
-          }
-        }
-      }
-    }
-
     let raf = 0
     let last = performance.now()
     let first = true
     let acc = 0
+    let lastLs = -1
 
     const frame = (now: number) => {
       // dt in 60fps frames; physics runs on a fixed step so it behaves the same on slow devices
@@ -382,12 +266,12 @@ export default function MammalExplorer() {
         let steps = Math.min(12, Math.floor(acc))
         acc -= Math.floor(acc)
         // fast-forward a little right after a change so new branches untangle quickly
-        if (settle.current > 0 && steps > 0) {
-          settle.current -= steps
-          steps += 2
-        }
+        if (heat.current > 0.6 && steps > 0) steps += 1
         const held = drag.current?.moved ? drag.current.id : null
-        for (let s = 0; s < steps; s++) simulate(bs, L, t, held)
+        for (let s = 0; s < steps; s++) {
+          step(bs, L, t, heat.current, wander, held)
+          heat.current = cool(heat.current)
+        }
         for (const b of bs) {
           b.r += (b.tr - b.r) * (1 - Math.pow(0.86, dt))
           b.alpha += (1 - b.alpha) * (1 - Math.pow(0.9, dt))
@@ -413,7 +297,9 @@ export default function MammalExplorer() {
         setRenderIds((ids) => ids.filter((id) => !gone.includes(id)))
       }
 
-      // ---- camera: gently keep everything in frame ----
+      // ---- camera: follow the branch you last opened ----
+      // The rest of the tree may drift out of frame. Zoom only adjusts while the
+      // layout is settling, then holds still, so the view never "breathes".
       const wide = W > 760
       const panel = panelOpen.current
       const areaL = 24
@@ -428,28 +314,36 @@ export default function MammalExplorer() {
         let minY = Infinity
         let maxX = -Infinity
         let maxY = -Infinity
-        for (const id of L.ids) {
+        for (const id of focusGroup.current ?? L.ids) {
           const b = map.get(id)
-          if (!b) continue
+          if (!b || b.leaving) continue
           minX = Math.min(minX, b.x - b.tr - 20)
           maxX = Math.max(maxX, b.x + b.tr + 20)
           minY = Math.min(minY, b.y - b.tr - 20)
           maxY = Math.max(maxY, b.y + b.tr + 40)
         }
         if (minX < Infinity) {
-          const ts = Math.min(1.25, Math.max(0.28, Math.min((areaR - areaL) / (maxX - minX), (areaB - areaT) / (maxY - minY))))
-          const ease = first ? 1 : 1 - Math.pow(0.955, dt)
-          c.s += (ts - c.s) * ease
-          c.x += ((minX + maxX) / 2 - c.x) * ease
-          c.y += ((minY + maxY) / 2 - c.y) * ease
+          if (first || now < c.fitUntil) {
+            c.ts = Math.min(1.15, Math.max(0.3, Math.min((areaR - areaL) / (maxX - minX), (areaB - areaT) / (maxY - minY))))
+          }
+          const zoomEase = first ? 1 : 1 - Math.pow(0.96, dt)
+          const panEase = first ? 1 : 1 - Math.pow(0.97, dt)
+          c.s += (c.ts - c.s) * zoomEase
+          c.x += ((minX + maxX) / 2 - c.x) * panEase
+          c.y += ((minY + maxY) / 2 - c.y) * panEase
           first = false
         }
       }
       const ox = ax - c.x * c.s
       const oy = ay - c.y * c.s
       world.style.transform = `translate3d(${ox}px, ${oy}px, 0) scale(${c.s})`
-      // labels shrink slower than the world so they stay readable when zoomed out
-      world.style.setProperty('--ls', String(Math.min(1.6, Math.pow(c.s, -0.55))))
+      // labels shrink slower than the world so they stay readable when zoomed out;
+      // only touch the variable when it really changes (it restyles every label)
+      const ls = Math.min(1.6, Math.pow(c.s, -0.55))
+      if (Math.abs(ls - lastLs) > 0.01) {
+        lastLs = ls
+        world.style.setProperty('--ls', ls.toFixed(3))
+      }
       stage.dataset.ox = String(ox)
       stage.dataset.oy = String(oy)
 
@@ -460,8 +354,9 @@ export default function MammalExplorer() {
         const bx = Math.sin(t * b.f2 * 1.7 + b.p1) * 3 * bob
         const by = Math.sin(t * b.f1 * 2.1 + b.p2) * 5 * bob
         const breathe = 1 + Math.sin(t * 0.9 + b.p1) * 0.012 * bob
-        el.style.transform = `translate3d(${b.x + bx - b.tr}px, ${b.y + by - b.tr}px, 0) scale(${(b.r / b.tr) * breathe})`
-        el.style.opacity = String(Math.min(1, b.alpha))
+        el.style.transform = `translate3d(${(b.x + bx - b.tr).toFixed(2)}px, ${(b.y + by - b.tr).toFixed(2)}px, 0) scale(${((b.r / b.tr) * breathe).toFixed(4)})`
+        const opacity = Math.min(1, b.alpha).toFixed(2)
+        if (el.style.opacity !== opacity) el.style.opacity = opacity
       }
 
       // ---- write links: silk threads that sway ----
@@ -478,7 +373,8 @@ export default function MammalExplorer() {
         const my = (y1 + y2) / 2
         const sway = Math.sin(t * 0.6 + b.p1) * 0.14 * bob
         path.setAttribute('d', `M${x1},${y1} Q${mx - (y2 - y1) * sway},${my + (x2 - x1) * sway} ${x2},${y2}`)
-        path.style.opacity = String(Math.min(b.alpha, p.alpha))
+        const opacity = Math.min(b.alpha, p.alpha).toFixed(2)
+        if (path.style.opacity !== opacity) path.style.opacity = opacity
       }
 
       // ---- background motes, with parallax against the camera ----
@@ -572,35 +468,48 @@ export default function MammalExplorer() {
   }, [selected, summaries])
 
   // ---- Interactions ----
-  const toggle = useCallback((id: string) => {
-    const node = TREE.nodes.get(id)!
-    setSelected(id)
-    if (!isClade(node)) return
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      if (next.has(id)) descendantsOf(id).forEach((d) => next.delete(d))
-      else next.add(id)
-      return next
-    })
-  }, [])
-
-  const reveal = useCallback((id: string) => {
-    setExpanded((prev) => {
-      const next = new Set(prev)
-      pathTo(TREE, id)
-        .slice(0, -1)
-        .forEach((n) => next.add(n.id))
-      return next
-    })
-    setSelected(id)
-    setQuery('')
-    setSearchOpen(false)
-  }, [])
-
-  const fitView = useCallback(() => {
+  /** Point the camera at a group of bubbles (null = the whole visible tree) */
+  const focusOn = useCallback((group: string[] | null) => {
+    focusGroup.current = group
     cam.current.manual = false
-    setManualCam(false)
+    cam.current.fitUntil = performance.now() + 1800
   }, [])
+
+  const toggle = useCallback(
+    (id: string) => {
+      const node = TREE.nodes.get(id)!
+      setSelected(id)
+      if (!isClade(node)) return
+      setExpanded((prev) => {
+        const next = new Set(prev)
+        const opening = !next.has(id)
+        if (opening) next.add(id)
+        else descendantsOf(id).forEach((d) => next.delete(d))
+        focusOn(focusGroupFor(id, opening))
+        return next
+      })
+    },
+    [focusOn],
+  )
+
+  const reveal = useCallback(
+    (id: string) => {
+      setExpanded((prev) => {
+        const next = new Set(prev)
+        pathTo(TREE, id)
+          .slice(0, -1)
+          .forEach((n) => next.add(n.id))
+        return next
+      })
+      focusOn(focusGroupFor(id, false))
+      setSelected(id)
+      setQuery('')
+      setSearchOpen(false)
+    },
+    [focusOn],
+  )
+
+  const fitView = useCallback(() => focusOn(null), [focusOn])
 
   const toWorld = (clientX: number, clientY: number) => {
     const stage = stageRef.current!
@@ -611,9 +520,7 @@ export default function MammalExplorer() {
   }
 
   const setManual = () => {
-    if (cam.current.manual) return
     cam.current.manual = true
-    setManualCam(true)
   }
 
   const zoomAt = (clientX: number, clientY: number, factor: number) => {
@@ -650,6 +557,13 @@ export default function MammalExplorer() {
   }
 
   const onPointerMove = (e: React.PointerEvent) => {
+    // Hover follows real pointer movement only. Bubbles drifting under a still
+    // cursor must not toggle it, or the highlight flickers on and off.
+    if (e.pointerType === 'mouse' && !drag.current?.moved) {
+      const under = document.elementFromPoint(e.clientX, e.clientY)?.closest<HTMLElement>('[data-id]')
+      const id = under?.dataset.id ?? null
+      setHovered((h) => (h === id ? h : id))
+    }
     if (pointers.current.has(e.pointerId)) pointers.current.set(e.pointerId, { x: e.clientX, y: e.clientY })
     if (pinch.current && pointers.current.size === 2) {
       const [a, b] = [...pointers.current.values()]
@@ -760,6 +674,7 @@ export default function MammalExplorer() {
         onPointerMove={onPointerMove}
         onPointerUp={onPointerUp}
         onPointerCancel={onPointerUp}
+        onPointerLeave={() => setHovered(null)}
         onWheel={onWheel}
       >
         <div ref={worldRef} className={styles.world}>
@@ -807,8 +722,6 @@ export default function MammalExplorer() {
                 tabIndex={0}
                 aria-label={`${n.name}${clade ? (open ? ', collapse branch' : ', expand branch') : ''}`}
                 aria-expanded={clade ? open : undefined}
-                onPointerEnter={() => setHovered(id)}
-                onPointerLeave={() => setHovered((h) => (h === id ? null : h))}
                 onKeyDown={(e) => onBubbleKey(e, id)}
                 onFocus={() => setHovered(id)}
                 onBlur={() => setHovered((h) => (h === id ? null : h))}
@@ -894,10 +807,16 @@ export default function MammalExplorer() {
               </ul>
             )}
           </div>
-          <button className={styles.ghost} onClick={() => setExpanded(new Set(INITIAL_EXPANDED))}>
+          <button
+            className={styles.ghost}
+            onClick={() => {
+              setExpanded(new Set(INITIAL_EXPANDED))
+              focusOn(null)
+            }}
+          >
             Reset
           </button>
-          <button className={styles.ghost} onClick={fitView} disabled={!manualCam}>
+          <button className={styles.ghost} onClick={fitView} title="Show the whole tree">
             Fit
           </button>
         </div>

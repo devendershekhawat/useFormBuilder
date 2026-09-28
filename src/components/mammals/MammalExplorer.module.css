@@ -118,9 +118,8 @@
 }
 
 .linkActive {
-  stroke: hsla(var(--h), 95%, 80%, 0.85);
-  stroke-width: 2.2;
-  filter: drop-shadow(0 0 6px hsla(var(--h), 95%, 70%, 0.8));
+  stroke: hsla(var(--h), 95%, 82%, 0.9);
+  stroke-width: 2.4;
 }
 
 /* ---------- bubbles ---------- */
@@ -226,9 +225,9 @@
   border-radius: 50%;
 }
 
-.bubble:hover .orb,
+/* hover brightens the glow only — resizing a bubble under the cursor makes
+   hover flip on and off as it drifts */
 .focused .orb {
-  transform: scale(1.08);
   box-shadow:
     inset 0 0 0 1.5px hsla(var(--h), 95%, 88%, 0.8),
     inset 0 -12px 28px hsla(var(--h), 95%, 62%, 0.4),
@@ -597,9 +596,8 @@
   border-radius: 24px;
   background:
     radial-gradient(400px 220px at 80% 0%, hsla(var(--h), 80%, 55%, 0.16), transparent 70%),
-    rgba(10, 16, 32, 0.74);
+    rgba(10, 16, 32, 0.93);
   border: 1px solid hsla(var(--h), 70%, 75%, 0.18);
-  backdrop-filter: blur(20px) saturate(1.2);
   box-shadow: 0 30px 80px rgba(0, 0, 0, 0.5);
   user-select: text;
   animation: panelIn 0.45s cubic-bezier(0.2, 0.9, 0.3, 1) both;
